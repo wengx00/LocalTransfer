@@ -3,6 +3,12 @@ import { Readable, pipeline } from "stream"
 
 export type ProtocolEvent = 'data' | 'close' | 'end'
 export type ProtocolHandler = (params: Buffer) => any
+export type StreamQueueItem = {
+    stream: Readable
+    length: number
+    callback?: (err?: any) => any
+    onProgress?: (percent: number, speed: string) => any
+}
 
 /**
  * 基于 TCP 封装的自定义应用层协议
@@ -13,8 +19,49 @@ export class Protocol {
     private handler = new Map<string, ProtocolHandler[]>()
     private pendingLength = 0
     private pendingData = Buffer.alloc(0)
+    private signal = false // 正在发送数据
+    private streamQueue: StreamQueueItem[] = []
     constructor(private readonly socket: Socket) {
         this.socketProxy()
+    }
+
+    /**
+     * 清空流式传输队列
+     */
+    private flushStreamQueue() {
+        if (!this.streamQueue.length) {
+            this.signal = false
+            return
+        }
+        this.signal = true
+        const { stream, length, callback, onProgress } = this.streamQueue.shift()!
+        const header = Buffer.alloc(4)
+        header.writeUInt32BE(length, 0)
+        this.socket.write(header)
+        let sended = 0
+        let lastTime = new Date().getTime()
+        let lastSend = 0
+        stream.on('data', (chunk) => {
+            if (!this.socket.write(chunk)) {
+                stream.pause()
+            }
+            const chunkLength = chunk.length
+            const curTime = new Date().getTime()
+            const percent = Math.round((sended + chunkLength) / length * 100)
+            const timeDiv = (curTime - lastTime) / 1000
+            lastSend += chunkLength
+            if (timeDiv >= 1) {
+                onProgress?.(Math.round(percent), (lastSend / 1000 / timeDiv).toFixed(2))
+                lastTime = curTime
+                lastSend = 0
+            }
+            sended += chunk.length
+        })
+        stream.on('end', () => {
+            callback?.()
+            this.flushStreamQueue.call(this)
+        })
+        this.socket.on('drain', () => stream.resume())
     }
 
     private socketProxy() {
@@ -57,12 +104,11 @@ export class Protocol {
         if (!this.handler.get(event)) this.handler.set(event, [handler])
         else this.handler.get(event)!.push(handler)
     }
-
     /**
-     * 基于自定义协议发送数据
-     * * 数据会加上4字节的Header，指示Body长度
-     * @param data 发送的数据
-     */
+         * 基于自定义协议发送数据
+         * * 数据会加上4字节的Header，指示Body长度
+         * @param data 发送的数据
+         */
     send(data: Buffer | string, cb?: (err?: Error) => any) {
         data = data instanceof Buffer ? data : Buffer.from(data)
         let buffer = Buffer.alloc(4)
@@ -75,5 +121,12 @@ export class Protocol {
      */
     dispose() {
         this.socket.end()
+    }
+    /**
+     * 流式传输
+     */
+    pipe(stream: Readable, length: number, callback?: (err?: any) => any, onProgress?: (percent: number, speed: string) => any) {
+        this.streamQueue.push({ stream, length, callback, onProgress })
+        if (!this.signal) this.flushStreamQueue()
     }
 }

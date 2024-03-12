@@ -1,6 +1,6 @@
 import { RemoteInfo, Socket as UdpSocket, createSocket as createUdpSocket } from "dgram"
 import EventEmitter from "events"
-import { readFile, writeFile } from "fs"
+import { createReadStream, readFile, stat, statSync, writeFile } from "fs"
 import ip from 'ip'
 import { Server as TcpServer, createConnection as createTcpConnection, createServer as createTcpServer } from "net"
 import { resolve } from "path"
@@ -189,20 +189,23 @@ export class LocalTranser {
             protocol.send(JSON.stringify(summary))
             pathList.forEach(path => {
                 const startTime = new Date().getTime()
-                readFile(path, (err, data) => {
+                stat(path, (err, status) => {
                     if (err) {
                         console.log('读取文件失败', err)
                         this.bus.emit(LocalEvent.ERROR, { address, port }, err)
                         return
                     }
                     console.log('读取文件成功...', path)
-                    protocol.send(data, (err) => {
+                    const stream = createReadStream(path)
+                    protocol.pipe(stream, status.size, (err) => {
                         if (err) {
                             console.log('传输文件失败', err)
                             this.bus.emit(LocalEvent.ERROR, { address, port }, err)
                             return
                         }
                         console.log('传输文件成功', path, (new Date().getTime() - startTime) / 1000 + 's')
+                    }, (percent, speed) => {
+                        console.log(path, `已发送: ${percent}%, 速度: ${speed}KB/s`)
                     })
                 })
             })
